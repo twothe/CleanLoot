@@ -354,7 +354,30 @@ local function StopConfirmMonitor()
 	confirmMonitorFrame:SetScript("OnUpdate", nil)
 end
 
-local function TryClickConfirmPopup()
+local function ConfirmPendingLootRoll(rollID, pending)
+	rollID = tonumber(rollID)
+	if not rollID or not pending or not pending.rollType then
+		return false
+	end
+	if pending.confirmed then
+		return true
+	end
+	if type(ConfirmLootRoll) ~= "function" then
+		return false
+	end
+
+	local ok, errorMessage = pcall(ConfirmLootRoll, rollID, pending.rollType)
+	if ok then
+		pending.confirmed = true
+		pending.expiresAt = GetCurrentTime() + CONFIRM_MONITOR_SECONDS
+		return true
+	end
+
+	PrintDebug(errorMessage)
+	return false
+end
+
+local function TryConfirmVisiblePopup()
 	if not IsEnabled() or not HasPendingConfirmation() then
 		return true
 	end
@@ -364,16 +387,8 @@ local function TryClickConfirmPopup()
 		local frame = _G["StaticPopup" .. index]
 		if frame and frame.IsShown and frame:IsShown() and frame.which == "CONFIRM_LOOT_ROLL" then
 			local rollID, pending = GetPopupPendingConfirmation(frame)
-			if pending and pending.confirmed and frame.Hide then
+			if pending and ConfirmPendingLootRoll(rollID, pending) and frame.Hide then
 				frame:Hide()
-				ClearPendingConfirmation(rollID)
-				return true
-			end
-			local button = _G["StaticPopup" .. index .. "Button1"]
-			if pending and button and button.IsEnabled and button:IsEnabled() and button.Click then
-				pending.confirmed = true
-				pending.expiresAt = GetCurrentTime() + CONFIRM_MONITOR_SECONDS
-				button:Click()
 				return true
 			end
 		end
@@ -383,7 +398,7 @@ local function TryClickConfirmPopup()
 end
 
 local function OnConfirmMonitorUpdate()
-	if TryClickConfirmPopup() or GetCurrentTime() >= confirmMonitorUntil then
+	if TryConfirmVisiblePopup() or GetCurrentTime() >= confirmMonitorUntil then
 		StopConfirmMonitor()
 	end
 end
@@ -401,24 +416,13 @@ local function AutoConfirmLootRoll(rollID, rollType)
 
 	if pending.confirmed then
 		StartConfirmMonitor()
-		TryClickConfirmPopup()
+		TryConfirmVisiblePopup()
 		return true
 	end
 
-	local confirmed = false
-	if type(ConfirmLootRoll) == "function" then
-		local confirmedRollType = tonumber(rollType) or pending.rollType
-		local ok, errorMessage = pcall(ConfirmLootRoll, tonumber(rollID), confirmedRollType)
-		if ok then
-			confirmed = true
-			pending.confirmed = true
-		else
-			PrintDebug(errorMessage)
-		end
-	end
-
+	local confirmed = ConfirmPendingLootRoll(rollID, pending)
 	StartConfirmMonitor()
-	TryClickConfirmPopup()
+	TryConfirmVisiblePopup()
 	return confirmed
 end
 
@@ -1131,7 +1135,7 @@ if type(hooksecurefunc) == "function" then
 	hooksecurefunc("StaticPopup_Show", function(which)
 		if which == "CONFIRM_LOOT_ROLL" and HasPendingConfirmation() then
 			StartConfirmMonitor()
-			TryClickConfirmPopup()
+			TryConfirmVisiblePopup()
 		end
 	end)
 end
