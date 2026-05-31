@@ -17,6 +17,7 @@ local ROLL_TYPE_DISENCHANT = 3
 local ROW_WIDTH = 396
 local ROW_HEIGHT = 32
 local ROW_SPACING = 3
+local COLUMN_SPACING = 8
 local ICON_SIZE = 26
 local BUTTON_WIDTH = 30
 local BUTTON_HEIGHT = 19
@@ -28,6 +29,7 @@ local TEXT_RIGHT_INSET = BUTTON_RIGHT_PADDING + BUTTON_GROUP_WIDTH + TIMER_WIDTH
 local RESULT_SECONDS = 2
 local DEFAULT_ROLL_SECONDS = 60
 local CONFIRM_MONITOR_SECONDS = 2
+local SCREEN_EDGE_PADDING = 20
 
 local DEFAULT_ANCHOR_POINT = {"BOTTOM", "BOTTOM", 0, 220}
 
@@ -281,14 +283,31 @@ local function HasPendingConfirmation()
 	return next(pendingConfirmations) ~= nil
 end
 
-local function HasConfirmedPendingConfirmation()
-	CleanupPendingConfirmations()
-	for _, pending in pairs(pendingConfirmations) do
-		if pending.confirmed then
-			return true
-		end
+local function ClearPendingConfirmation(rollID)
+	rollID = tonumber(rollID)
+	if rollID then
+		pendingConfirmations[rollID] = nil
 	end
-	return false
+end
+
+local function ClearPendingConfirmations()
+	for rollID in pairs(pendingConfirmations) do
+		pendingConfirmations[rollID] = nil
+	end
+end
+
+local function GetOnlyPendingConfirmation()
+	CleanupPendingConfirmations()
+	local foundRollID = nil
+	local foundPending = nil
+	for rollID, pending in pairs(pendingConfirmations) do
+		if foundPending then
+			return nil, nil
+		end
+		foundRollID = rollID
+		foundPending = pending
+	end
+	return foundRollID, foundPending
 end
 
 local function GetPendingConfirmation(rollID, rollType)
@@ -308,8 +327,18 @@ local function GetPendingConfirmation(rollID, rollType)
 	return pending
 end
 
+local function GetPopupPendingConfirmation(frame)
+	local rollID = tonumber(frame and frame.data)
+	local rollType = tonumber(frame and frame.data2)
+	if rollID then
+		return rollID, GetPendingConfirmation(rollID, rollType)
+	end
+
+	return GetOnlyPendingConfirmation()
+end
+
 local function TrackPendingConfirmation(row, choice, rollType)
-	if choice == "PASS" or not row or not row.rollID or not rollType then
+	if choice == "PASS" or not row or not row.rollID or not rollType or not row.bindOnPickUp then
 		return
 	end
 
@@ -334,12 +363,16 @@ local function TryClickConfirmPopup()
 	for index = 1, popupCount do
 		local frame = _G["StaticPopup" .. index]
 		if frame and frame.IsShown and frame:IsShown() and frame.which == "CONFIRM_LOOT_ROLL" then
-			if HasConfirmedPendingConfirmation() and frame.Hide then
+			local rollID, pending = GetPopupPendingConfirmation(frame)
+			if pending and pending.confirmed and frame.Hide then
 				frame:Hide()
+				ClearPendingConfirmation(rollID)
 				return true
 			end
 			local button = _G["StaticPopup" .. index .. "Button1"]
-			if button and button.IsEnabled and button:IsEnabled() and button.Click then
+			if pending and button and button.IsEnabled and button:IsEnabled() and button.Click then
+				pending.confirmed = true
+				pending.expiresAt = GetCurrentTime() + CONFIRM_MONITOR_SECONDS
 				button:Click()
 				return true
 			end
@@ -366,6 +399,12 @@ local function AutoConfirmLootRoll(rollID, rollType)
 		return false
 	end
 
+	if pending.confirmed then
+		StartConfirmMonitor()
+		TryClickConfirmPopup()
+		return true
+	end
+
 	local confirmed = false
 	if type(ConfirmLootRoll) == "function" then
 		local confirmedRollType = tonumber(rollType) or pending.rollType
@@ -379,6 +418,7 @@ local function AutoConfirmLootRoll(rollID, rollType)
 	end
 
 	StartConfirmMonitor()
+	TryClickConfirmPopup()
 	return confirmed
 end
 
@@ -471,12 +511,113 @@ local function ShowItemTooltip(row)
 	row.compareShown = compareEnabled
 end
 
+local function PointContains(point, token)
+	return type(point) == "string" and string.find(point, token, 1, true) ~= nil
+end
+
+local function GetAnchorPointTokens()
+	if anchor.GetPoint then
+		local point, _, relativePoint = anchor:GetPoint(1)
+		return point, relativePoint
+	end
+	return nil, nil
+end
+
+local function ShouldGrowUp()
+	if anchor.GetTop and anchor.GetBottom and UIParent and UIParent.GetHeight then
+		local anchorTop = anchor:GetTop()
+		local anchorBottom = anchor:GetBottom()
+		local parentHeight = UIParent:GetHeight()
+		if anchorTop and anchorBottom and parentHeight then
+			local spaceUp = math.max(0, parentHeight - anchorTop - SCREEN_EDGE_PADDING)
+			local spaceDown = math.max(0, anchorBottom - SCREEN_EDGE_PADDING)
+			return spaceUp >= spaceDown
+		end
+	end
+
+	local point, relativePoint = GetAnchorPointTokens()
+	if PointContains(point, "BOTTOM") or PointContains(relativePoint, "BOTTOM") then
+		return true
+	elseif PointContains(point, "TOP") or PointContains(relativePoint, "TOP") then
+		return false
+	end
+
+	return true
+end
+
+local function GetRowsPerColumn(growUp)
+	if anchor.GetTop and anchor.GetBottom and UIParent and UIParent.GetHeight then
+		local anchorTop = anchor:GetTop()
+		local anchorBottom = anchor:GetBottom()
+		local parentHeight = UIParent:GetHeight()
+		if anchorTop and anchorBottom and parentHeight then
+			local availableHeight
+			if growUp then
+				availableHeight = math.max(ROW_HEIGHT, parentHeight - anchorTop - SCREEN_EDGE_PADDING)
+			else
+				availableHeight = math.max(ROW_HEIGHT, anchorBottom - SCREEN_EDGE_PADDING)
+			end
+			return math.max(1, math.floor((availableHeight + ROW_SPACING) / (ROW_HEIGHT + ROW_SPACING)))
+		end
+	end
+
+	return math.max(1, #rowOrder)
+end
+
+local function GetPreferredColumnDirection()
+	if anchor.GetLeft and anchor.GetRight and UIParent and UIParent.GetWidth then
+		local anchorLeft = anchor:GetLeft()
+		local anchorRight = anchor:GetRight()
+		local parentWidth = UIParent:GetWidth()
+		if anchorLeft and anchorRight and parentWidth then
+			local spaceLeft = math.max(0, anchorLeft - SCREEN_EDGE_PADDING)
+			local spaceRight = math.max(0, parentWidth - anchorRight - SCREEN_EDGE_PADDING)
+			if spaceLeft > spaceRight then
+				return -1
+			end
+		end
+	end
+
+	return 1
+end
+
+local function GetColumnOffset(columnIndex, preferredDirection)
+	if columnIndex <= 0 then
+		return 0
+	end
+
+	local step = math.floor((columnIndex + 1) / 2)
+	local direction = preferredDirection
+	if columnIndex % 2 == 0 then
+		direction = -direction
+	end
+	return direction * step * (ROW_WIDTH + COLUMN_SPACING)
+end
+
 local function RefreshLayout()
+	local growUp = ShouldGrowUp()
+	local rowsPerColumn = GetRowsPerColumn(growUp)
+	local preferredColumnDirection = GetPreferredColumnDirection()
+	local rowDistance = ROW_HEIGHT + ROW_SPACING
+
 	for index, rollID in ipairs(rowOrder) do
 		local row = rows[rollID]
 		if row and row.frame then
+			local zeroBasedIndex = index - 1
+			local columnIndex = math.floor(zeroBasedIndex / rowsPerColumn)
+			local rowIndex = zeroBasedIndex % rowsPerColumn
+			local xOffset = GetColumnOffset(columnIndex, preferredColumnDirection)
+			local yOffset = rowIndex * rowDistance
+
 			row.frame:ClearAllPoints()
-			row.frame:SetPoint("TOP", anchor, "TOP", 0, -((index - 1) * (ROW_HEIGHT + ROW_SPACING)))
+			if growUp then
+				row.frame:SetPoint("BOTTOM", anchor, "BOTTOM", xOffset, yOffset)
+			else
+				row.frame:SetPoint("TOP", anchor, "TOP", xOffset, -yOffset)
+			end
+			if row.frame.SetFrameLevel and anchor.GetFrameLevel then
+				row.frame:SetFrameLevel((anchor:GetFrameLevel() or 0) + index)
+			end
 		end
 	end
 end
@@ -499,7 +640,7 @@ local function RemoveRow(rollID)
 		return
 	end
 
-	pendingConfirmations[rollID] = nil
+	ClearPendingConfirmation(rollID)
 	rows[rollID] = nil
 	for index, existingRollID in ipairs(rowOrder) do
 		if existingRollID == rollID then
@@ -513,7 +654,7 @@ local function RemoveRow(rollID)
 end
 
 local function ScheduleRowRemoval(row, seconds)
-	row.removeAt = (GetTime and GetTime() or 0) + (seconds or RESULT_SECONDS)
+	row.removeAt = GetCurrentTime() + (seconds or RESULT_SECONDS)
 end
 
 local function GetRollTimeLeftSeconds(row)
@@ -525,7 +666,7 @@ local function GetRollTimeLeftSeconds(row)
 	end
 
 	if row.expiresAt then
-		return math.max(0, row.expiresAt - (GetTime and GetTime() or 0))
+		return math.max(0, row.expiresAt - GetCurrentTime())
 	end
 	return DEFAULT_ROLL_SECONDS
 end
@@ -542,10 +683,10 @@ local function RefreshRollInfo(row)
 	end
 
 	local itemID = ExtractItemID(itemLink) or row.itemID
-	local itemName, cachedLink, cachedQuality, itemLevel, reqLevel, itemType, itemSubType, maxStack, equipLoc, itemTexture
+	local itemName, cachedLink, cachedQuality, itemLevel, _, itemType, itemSubType, _, equipLoc, itemTexture
 	local itemQuery = itemLink or (itemID and ("item:" .. tostring(itemID)))
 	if itemQuery and type(GetItemInfo) == "function" then
-		itemName, cachedLink, cachedQuality, itemLevel, reqLevel, itemType, itemSubType, maxStack, equipLoc, itemTexture = GetItemInfo(itemQuery)
+		itemName, cachedLink, cachedQuality, itemLevel, _, itemType, itemSubType, _, equipLoc, itemTexture = GetItemInfo(itemQuery)
 	end
 	if not itemTexture and itemID and type(GetItemIcon) == "function" then
 		itemTexture = GetItemIcon(itemID)
@@ -604,7 +745,7 @@ local function SelectRoll(row, choice)
 	TrackPendingConfirmation(row, choice, rollType)
 	local ok, errorMessage = pcall(RollOnLoot, row.rollID, rollType)
 	if not ok then
-		pendingConfirmations[row.rollID] = nil
+		ClearPendingConfirmation(row.rollID)
 		row.statusMode = "error"
 		row.status:SetTextColor(0.90, 0.25, 0.20)
 		row.status:SetText("Roll failed")
@@ -613,10 +754,12 @@ local function SelectRoll(row, choice)
 	end
 
 	row.selected = choice
-	row.statusMode = "selected"
-	local r, g, b = GetChoiceColor(choice)
-	row.status:SetTextColor(r, g, b)
-	row.status:SetText("Selected " .. GetChoiceTooltip(choice))
+	if row.statusMode ~= "confirmed" and row.statusMode ~= "confirm" then
+		row.statusMode = "selected"
+		local r, g, b = GetChoiceColor(choice)
+		row.status:SetTextColor(r, g, b)
+		row.status:SetText("Selected " .. GetChoiceTooltip(choice))
+	end
 	RefreshButtons(row)
 end
 
@@ -785,7 +928,7 @@ local function AcquireRow(rollID)
 	row.canGreed = false
 	row.canDisenchant = false
 	row.selected = nil
-	row.startedAt = GetTime and GetTime() or 0
+	row.startedAt = GetCurrentTime()
 	row.expiresAt = row.startedAt + DEFAULT_ROLL_SECONDS
 	row.removeAt = nil
 	row.hovered = nil
@@ -816,7 +959,7 @@ local function StartRoll(rollID, rollTime)
 
 	local row = rows[rollID] or AcquireRow(rollID)
 	row.rollID = rollID
-	row.startedAt = GetTime and GetTime() or 0
+	row.startedAt = GetCurrentTime()
 	row.selected = nil
 	row.removeAt = nil
 	row.statusMode = "details"
@@ -855,6 +998,8 @@ local function SetEnabled(enabled)
 		Print("enabled.")
 	else
 		ClearRows()
+		ClearPendingConfirmations()
+		StopConfirmMonitor()
 		RestoreNativeLootRollFrames()
 		Print("disabled.")
 	end
@@ -895,7 +1040,7 @@ local function HandleSlashCommand(message)
 end
 
 local function OnUpdate()
-	local now = GetTime and GetTime() or 0
+	local now = GetCurrentTime()
 	local removeIDs = {}
 
 	for rollID, row in pairs(rows) do
@@ -942,6 +1087,8 @@ local function OnEvent(_, event, ...)
 		UpdateAnchorVisibility()
 	elseif event == "PLAYER_ENTERING_WORLD" then
 		ClearRows()
+		ClearPendingConfirmations()
+		StopConfirmMonitor()
 		RestoreNativeLootRollFrames()
 	elseif event == "START_LOOT_ROLL" then
 		StartRoll(...)

@@ -4,6 +4,7 @@
 - Use native WotLK group-loot APIs and events (`START_LOOT_ROLL`, `CANCEL_LOOT_ROLL`, `GetLootRollItemInfo`, `GetLootRollItemLink`, `GetLootRollTimeLeft`, `RollOnLoot`) unless the user explicitly asks for a custom realm protocol.
 - Do not depend on the separate `ServerFeatures` addon or its `RLR` addon-message protocol in this project.
 - Auto-confirm BoP roll confirmations only for CleanLoot-initiated roll choices; do not globally click unrelated `LOOT_BIND` or other loot popups.
+- Keep long roll lists reachable: rows should grow toward available screen space and wrap into columns instead of extending off-screen from the default bottom anchor.
 - Keep runtime code and developer-facing text in English. User-facing discussion with the owner can be German.
 - For release-relevant changes, update `## Version:` in `CleanLoot.toc`. The first public release version is `1.0.0`; use patch increments for fixes and minor increments for user-facing features.
 
