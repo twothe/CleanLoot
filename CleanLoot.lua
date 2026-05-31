@@ -27,6 +27,7 @@ local TIMER_WIDTH = 28
 local TEXT_RIGHT_INSET = BUTTON_RIGHT_PADDING + BUTTON_GROUP_WIDTH + TIMER_WIDTH + 16
 local RESULT_SECONDS = 2
 local DEFAULT_ROLL_SECONDS = 60
+local CONFIRM_MONITOR_SECONDS = 2
 
 local DEFAULT_ANCHOR_POINT = {"BOTTOM", "BOTTOM", 0, 220}
 
@@ -46,12 +47,15 @@ local ROLL_TYPE_TO_CHOICE = {
 
 local eventFrame = CreateFrame("Frame")
 local updateFrame = CreateFrame("Frame")
+local confirmMonitorFrame = CreateFrame("Frame")
 local anchor = CreateFrame("Frame", "CleanLootAnchor", UIParent)
 
 local rows = {}
 local rowOrder = {}
 local rowPool = {}
 local hiddenNativeFrames = {}
+local pendingConfirmations = {}
+local confirmMonitorUntil = 0
 
 anchor:SetWidth(ROW_WIDTH)
 anchor:SetHeight(16)
@@ -108,6 +112,16 @@ end
 
 local function HasActiveRows()
 	return next(rows) ~= nil
+end
+
+local function GetCurrentTime()
+	if type(GetTime) == "function" then
+		return GetTime()
+	end
+	if type(time) == "function" then
+		return time()
+	end
+	return 0
 end
 
 local function SetDefaultAnchorPoint()
@@ -253,6 +267,121 @@ local function RestoreNativeLootRollFrames()
 	end
 end
 
+local function CleanupPendingConfirmations()
+	local now = GetCurrentTime()
+	for rollID, pending in pairs(pendingConfirmations) do
+		if not pending.expiresAt or pending.expiresAt <= now then
+			pendingConfirmations[rollID] = nil
+		end
+	end
+end
+
+local function HasPendingConfirmation()
+	CleanupPendingConfirmations()
+	return next(pendingConfirmations) ~= nil
+end
+
+local function HasConfirmedPendingConfirmation()
+	CleanupPendingConfirmations()
+	for _, pending in pairs(pendingConfirmations) do
+		if pending.confirmed then
+			return true
+		end
+	end
+	return false
+end
+
+local function GetPendingConfirmation(rollID, rollType)
+	rollID = tonumber(rollID)
+	rollType = tonumber(rollType)
+	if not rollID then
+		return nil
+	end
+
+	local pending = pendingConfirmations[rollID]
+	if not pending then
+		return nil
+	end
+	if rollType and pending.rollType and rollType ~= pending.rollType then
+		return nil
+	end
+	return pending
+end
+
+local function TrackPendingConfirmation(row, choice, rollType)
+	if choice == "PASS" or not row or not row.rollID or not rollType then
+		return
+	end
+
+	pendingConfirmations[row.rollID] = {
+		rollType = rollType,
+		choice = choice,
+		expiresAt = GetCurrentTime() + CONFIRM_MONITOR_SECONDS,
+	}
+	confirmMonitorUntil = GetCurrentTime() + CONFIRM_MONITOR_SECONDS
+end
+
+local function StopConfirmMonitor()
+	confirmMonitorFrame:SetScript("OnUpdate", nil)
+end
+
+local function TryClickConfirmPopup()
+	if not IsEnabled() or not HasPendingConfirmation() then
+		return true
+	end
+
+	local popupCount = STATICPOPUP_NUMDIALOGS or 4
+	for index = 1, popupCount do
+		local frame = _G["StaticPopup" .. index]
+		if frame and frame.IsShown and frame:IsShown() and frame.which == "CONFIRM_LOOT_ROLL" then
+			if HasConfirmedPendingConfirmation() and frame.Hide then
+				frame:Hide()
+				return true
+			end
+			local button = _G["StaticPopup" .. index .. "Button1"]
+			if button and button.IsEnabled and button:IsEnabled() and button.Click then
+				button:Click()
+				return true
+			end
+		end
+	end
+
+	return false
+end
+
+local function OnConfirmMonitorUpdate()
+	if TryClickConfirmPopup() or GetCurrentTime() >= confirmMonitorUntil then
+		StopConfirmMonitor()
+	end
+end
+
+local function StartConfirmMonitor()
+	confirmMonitorUntil = GetCurrentTime() + CONFIRM_MONITOR_SECONDS
+	confirmMonitorFrame:SetScript("OnUpdate", OnConfirmMonitorUpdate)
+end
+
+local function AutoConfirmLootRoll(rollID, rollType)
+	local pending = GetPendingConfirmation(rollID, rollType)
+	if not pending then
+		return false
+	end
+
+	local confirmed = false
+	if type(ConfirmLootRoll) == "function" then
+		local confirmedRollType = tonumber(rollType) or pending.rollType
+		local ok, errorMessage = pcall(ConfirmLootRoll, tonumber(rollID), confirmedRollType)
+		if ok then
+			confirmed = true
+			pending.confirmed = true
+		else
+			PrintDebug(errorMessage)
+		end
+	end
+
+	StartConfirmMonitor()
+	return confirmed
+end
+
 local function BuildItemDetailText(row)
 	local parts = {}
 
@@ -370,6 +499,7 @@ local function RemoveRow(rollID)
 		return
 	end
 
+	pendingConfirmations[rollID] = nil
 	rows[rollID] = nil
 	for index, existingRollID in ipairs(rowOrder) do
 		if existingRollID == rollID then
@@ -471,8 +601,10 @@ local function SelectRoll(row, choice)
 		return
 	end
 
+	TrackPendingConfirmation(row, choice, rollType)
 	local ok, errorMessage = pcall(RollOnLoot, row.rollID, rollType)
 	if not ok then
+		pendingConfirmations[row.rollID] = nil
 		row.statusMode = "error"
 		row.status:SetTextColor(0.90, 0.25, 0.20)
 		row.status:SetText("Roll failed")
@@ -824,9 +956,15 @@ local function OnEvent(_, event, ...)
 		if row then
 			local choice = ROLL_TYPE_TO_CHOICE[tonumber(rollType)] or row.selected or "NEED"
 			local r, g, b = GetChoiceColor(choice)
-			row.statusMode = "confirm"
-			row.status:SetTextColor(r, g, b)
-			row.status:SetText("Confirm " .. GetChoiceTooltip(choice) .. " in popup")
+			if AutoConfirmLootRoll(rollID, rollType) then
+				row.statusMode = "confirmed"
+				row.status:SetTextColor(r, g, b)
+				row.status:SetText("Confirmed " .. GetChoiceTooltip(choice))
+			else
+				row.statusMode = "confirm"
+				row.status:SetTextColor(r, g, b)
+				row.status:SetText("Confirm " .. GetChoiceTooltip(choice) .. " in popup")
+			end
 		end
 	end
 end
@@ -838,6 +976,15 @@ if type(hooksecurefunc) == "function" and type(GroupLootFrame_OpenNewFrame) == "
 	hooksecurefunc("GroupLootFrame_OpenNewFrame", function()
 		if IsEnabled() then
 			HideNativeLootRollFrames()
+		end
+	end)
+end
+
+if type(hooksecurefunc) == "function" then
+	hooksecurefunc("StaticPopup_Show", function(which)
+		if which == "CONFIRM_LOOT_ROLL" and HasPendingConfirmation() then
+			StartConfirmMonitor()
+			TryClickConfirmPopup()
 		end
 	end)
 end
