@@ -30,6 +30,7 @@ local RESULT_SECONDS = 2
 local DEFAULT_ROLL_SECONDS = 60
 local CONFIRM_MONITOR_SECONDS = 2
 local SCREEN_EDGE_PADDING = 20
+local MAX_NATIVE_LOOT_FRAME_SCAN = 40
 
 local DEFAULT_ANCHOR_POINT = {"BOTTOM", "BOTTOM", 0, 220}
 
@@ -56,6 +57,7 @@ local rows = {}
 local rowOrder = {}
 local rowPool = {}
 local hiddenNativeFrames = {}
+local disabledNativeFrameMouse = {}
 local pendingConfirmations = {}
 local confirmMonitorUntil = 0
 
@@ -243,24 +245,48 @@ local function HideCompareTooltips()
 	end
 end
 
+local function GetNativeLootRollFrameScanLimit()
+	local configuredCount = tonumber(NUM_GROUP_LOOT_FRAMES) or 4
+	local scanLimit = math.max(configuredCount, 4)
+	for index = scanLimit + 1, MAX_NATIVE_LOOT_FRAME_SCAN do
+		if not _G["GroupLootFrame" .. index] then
+			return scanLimit
+		end
+		scanLimit = index
+	end
+	return scanLimit
+end
+
 local function HideNativeLootRollFrames()
 	if not IsEnabled() then
 		return
 	end
 
-	local count = NUM_GROUP_LOOT_FRAMES or 4
+	local count = GetNativeLootRollFrameScanLimit()
 	for index = 1, count do
 		local frame = _G["GroupLootFrame" .. index]
-		if frame and frame.Hide then
+		if frame then
 			if frame.IsShown and frame:IsShown() then
 				hiddenNativeFrames[frame] = true
 			end
-			frame:Hide()
+			if frame.EnableMouse and (not frame.IsMouseEnabled or frame:IsMouseEnabled()) then
+				disabledNativeFrameMouse[frame] = true
+				frame:EnableMouse(false)
+			end
+			if frame.Hide then
+				frame:Hide()
+			end
 		end
 	end
 end
 
 local function RestoreNativeLootRollFrames()
+	for frame in pairs(disabledNativeFrameMouse) do
+		if frame and frame.EnableMouse then
+			frame:EnableMouse(true)
+		end
+		disabledNativeFrameMouse[frame] = nil
+	end
 	for frame in pairs(hiddenNativeFrames) do
 		if frame and frame.Show and frame.rollID then
 			frame:Show()
@@ -338,7 +364,10 @@ local function GetPopupPendingConfirmation(frame)
 end
 
 local function TrackPendingConfirmation(row, choice, rollType)
-	if choice == "PASS" or not row or not row.rollID or not rollType or not row.bindOnPickUp then
+	if choice == "PASS" or not row or not row.rollID or not rollType then
+		return
+	end
+	if row.rollOptionsReady and not row.bindOnPickUp then
 		return
 	end
 
@@ -484,11 +513,31 @@ local function SetButtonEnabled(button, enabled)
 	end
 end
 
+local function IsRollChoiceAvailable(row, choice)
+	if not row or row.selected then
+		return false
+	end
+	if choice == "PASS" then
+		return true
+	end
+	if not row.rollOptionsReady then
+		return true
+	end
+	if choice == "NEED" then
+		return row.canNeed
+	elseif choice == "GREED" then
+		return row.canGreed
+	elseif choice == "DISENCHANT" then
+		return row.canDisenchant
+	end
+	return false
+end
+
 local function RefreshButtons(row)
-	SetButtonEnabled(row.buttons.NEED, row.canNeed and not row.selected)
-	SetButtonEnabled(row.buttons.GREED, row.canGreed and not row.selected)
-	SetButtonEnabled(row.buttons.DISENCHANT, row.canDisenchant and not row.selected)
-	SetButtonEnabled(row.buttons.PASS, not row.selected)
+	SetButtonEnabled(row.buttons.NEED, IsRollChoiceAvailable(row, "NEED"))
+	SetButtonEnabled(row.buttons.GREED, IsRollChoiceAvailable(row, "GREED"))
+	SetButtonEnabled(row.buttons.DISENCHANT, IsRollChoiceAvailable(row, "DISENCHANT"))
+	SetButtonEnabled(row.buttons.PASS, IsRollChoiceAvailable(row, "PASS"))
 end
 
 local function ShowItemTooltip(row)
@@ -620,7 +669,13 @@ local function RefreshLayout()
 				row.frame:SetPoint("TOP", anchor, "TOP", xOffset, -yOffset)
 			end
 			if row.frame.SetFrameLevel and anchor.GetFrameLevel then
-				row.frame:SetFrameLevel((anchor:GetFrameLevel() or 0) + index)
+				local frameLevel = (anchor:GetFrameLevel() or 0) + (index * 4)
+				row.frame:SetFrameLevel(frameLevel)
+				for _, button in pairs(row.buttons) do
+					if button.SetFrameLevel then
+						button:SetFrameLevel(frameLevel + 2)
+					end
+				end
 			end
 		end
 	end
@@ -706,10 +761,16 @@ local function RefreshRollInfo(row)
 	row.itemSubType = itemSubType or row.itemSubType
 	row.equipLoc = equipLoc or row.equipLoc
 	row.itemInfoReady = itemName ~= nil
-	row.bindOnPickUp = bindOnPickUp or false
-	row.canNeed = canNeed and true or false
-	row.canGreed = canGreed and true or false
-	row.canDisenchant = canDisenchant and true or false
+
+	if bindOnPickUp ~= nil then
+		row.bindOnPickUp = bindOnPickUp and true or false
+	end
+	if canNeed ~= nil or canGreed ~= nil or canDisenchant ~= nil then
+		row.rollOptionsReady = true
+		row.canNeed = canNeed and true or false
+		row.canGreed = canGreed and true or false
+		row.canDisenchant = canDisenchant and true or false
+	end
 
 	local color = ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[row.quality]
 	if color then
@@ -735,6 +796,15 @@ end
 
 local function SelectRoll(row, choice)
 	if row.selected then
+		return
+	end
+
+	PrintDebug("click rollID=" .. tostring(row.rollID) .. " choice=" .. tostring(choice))
+	RefreshRollInfo(row)
+	if not IsRollChoiceAvailable(row, choice) then
+		row.statusMode = "error"
+		row.status:SetTextColor(0.90, 0.25, 0.20)
+		row.status:SetText(GetChoiceTooltip(choice) .. " unavailable")
 		return
 	end
 
@@ -772,6 +842,7 @@ local function CreateRollButton(row, choice, index)
 	button:SetWidth(BUTTON_WIDTH)
 	button:SetHeight(BUTTON_HEIGHT)
 	button:SetPoint("RIGHT", row.frame, "RIGHT", -(BUTTON_RIGHT_PADDING + (index - 1) * (BUTTON_WIDTH + BUTTON_SPACING)), 0)
+	button:EnableMouse(true)
 	button:RegisterForClicks("LeftButtonUp")
 	button.choice = choice
 
@@ -927,6 +998,7 @@ local function AcquireRow(rollID)
 	row.itemSubType = nil
 	row.equipLoc = nil
 	row.itemInfoReady = false
+	row.rollOptionsReady = false
 	row.bindOnPickUp = false
 	row.canNeed = false
 	row.canGreed = false
@@ -967,6 +1039,11 @@ local function StartRoll(rollID, rollTime)
 	row.selected = nil
 	row.removeAt = nil
 	row.statusMode = "details"
+	row.rollOptionsReady = false
+	row.bindOnPickUp = false
+	row.canNeed = false
+	row.canGreed = false
+	row.canDisenchant = false
 
 	local seconds = (tonumber(rollTime) or 0) / 1000
 	if seconds <= 0 then
@@ -1060,7 +1137,7 @@ local function OnUpdate()
 			end
 			row.timerBar:SetWidth(width)
 
-			if not row.itemInfoReady then
+			if not row.itemInfoReady or not row.rollOptionsReady then
 				RefreshRollInfo(row)
 			end
 			if remaining <= 0 and not row.removeAt then

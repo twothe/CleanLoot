@@ -3,6 +3,8 @@
 - CleanLoot is a standalone WoW 3.3.5a addon in this directory.
 - Use native WotLK group-loot APIs and events (`START_LOOT_ROLL`, `CANCEL_LOOT_ROLL`, `GetLootRollItemInfo`, `GetLootRollItemLink`, `GetLootRollTimeLeft`, `RollOnLoot`) unless the user explicitly asks for a custom realm protocol.
 - Do not depend on the separate `ServerFeatures` addon or its `RLR` addon-message protocol in this project.
+- When hiding Blizzard group-loot UI, scan all available `GroupLootFrameN` frames instead of trusting `NUM_GROUP_LOOT_FRAMES`; extra native frames can sit over CleanLoot rows and steal mouse clicks on many-drop loot.
+- Keep item-cache readiness separate from roll-option readiness; unknown Need/Greed/Disenchant flags must stay clickable until native APIs return explicit availability values.
 - Auto-confirm BoP roll confirmations only for CleanLoot-initiated roll choices; call `ConfirmLootRoll` with the tracked `rollID/rollType` and hide the `CONFIRM_LOOT_ROLL` popup instead of clicking Blizzard's popup button. Do not globally click unrelated `LOOT_BIND` or other loot popups.
 - Keep long roll lists reachable: rows should grow toward available screen space and wrap into columns instead of extending off-screen from the default bottom anchor.
 - Keep runtime code and developer-facing text in English. User-facing discussion with the owner can be German.
