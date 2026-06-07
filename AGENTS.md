@@ -5,7 +5,10 @@
 - Do not depend on the separate `ServerFeatures` addon or its `RLR` addon-message protocol in this project.
 - When hiding Blizzard group-loot UI, scan all available `GroupLootFrameN` frames instead of trusting `NUM_GROUP_LOOT_FRAMES`; extra native frames can sit over CleanLoot rows and steal mouse clicks on many-drop loot.
 - Keep item-cache readiness separate from roll-option readiness; unknown Need/Greed/Disenchant flags must stay clickable until native APIs return explicit availability values.
+- Treat WotLK roll-option `false` values without `reasonNeed`/`reasonGreed`/`reasonDisenchant` as unknown, not explicitly unavailable; extra simultaneous loot rolls can otherwise appear permanently disabled even though `RollOnLoot` still accepts the native `rollID`.
+- Keep roll diagnostics disabled by default, bounded, and machine-readable in `CleanLootDB.rollTrace.entries`; slash command control is `/cleanloot trace on|off|clear`.
 - Auto-confirm BoP roll confirmations only for CleanLoot-initiated roll choices; call `ConfirmLootRoll` with the tracked `rollID/rollType` and hide the `CONFIRM_LOOT_ROLL` popup instead of clicking Blizzard's popup button. Do not globally click unrelated `LOOT_BIND` or other loot popups.
+- `RollOnLoot` can synchronously trigger `CANCEL_LOOT_ROLL` before `CONFIRM_LOOT_ROLL` and before `RollOnLoot` returns; keep pending confirmations independent from row lifetime and avoid mutating released rows after the API call.
 - Keep long roll lists reachable: rows should grow toward available screen space and wrap into columns instead of extending off-screen from the default bottom anchor.
 - Keep runtime code and developer-facing text in English. User-facing discussion with the owner can be German.
 - For release-relevant changes, update `## Version:` in `CleanLoot.toc`. The first public release version is `1.0.0`; use patch increments for fixes and minor increments for user-facing features.

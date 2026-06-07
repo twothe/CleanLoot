@@ -2,7 +2,7 @@
 ## Title: CleanLoot
 ## Notes: Compact native group-loot roll display for WoW 3.3.5a clients.
 ## Author: Local
-## Version: 1.0.6
+## Version: 1.1.2
 ## SavedVariables: CleanLootDB
 
 CleanLoot.lua

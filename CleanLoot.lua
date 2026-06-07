@@ -31,6 +31,9 @@ local DEFAULT_ROLL_SECONDS = 60
 local CONFIRM_MONITOR_SECONDS = 2
 local SCREEN_EDGE_PADDING = 20
 local MAX_NATIVE_LOOT_FRAME_SCAN = 40
+local ROLL_TRACE_SCHEMA_VERSION = 1
+local ROLL_TRACE_DEFAULTS_VERSION = 2
+local ROLL_TRACE_MAX_ENTRIES = 300
 
 local DEFAULT_ANCHOR_POINT = {"BOTTOM", "BOTTOM", 0, 220}
 
@@ -47,6 +50,10 @@ local ROLL_TYPE_TO_CHOICE = {
 	[ROLL_TYPE_GREED] = "GREED",
 	[ROLL_TYPE_DISENCHANT] = "DISENCHANT",
 }
+
+local OPTION_STATE_AVAILABLE = "available"
+local OPTION_STATE_UNAVAILABLE = "unavailable"
+local OPTION_STATE_UNKNOWN = "unknown"
 
 local eventFrame = CreateFrame("Frame")
 local updateFrame = CreateFrame("Frame")
@@ -101,6 +108,12 @@ local function GetDatabase()
 	if CleanLootDB.debug == nil then
 		CleanLootDB.debug = false
 	end
+	if CleanLootDB.rollTraceDefaultsVersion ~= ROLL_TRACE_DEFAULTS_VERSION then
+		CleanLootDB.rollTraceEnabled = false
+		CleanLootDB.rollTraceDefaultsVersion = ROLL_TRACE_DEFAULTS_VERSION
+	elseif CleanLootDB.rollTraceEnabled == nil then
+		CleanLootDB.rollTraceEnabled = false
+	end
 	return CleanLootDB
 end
 
@@ -126,6 +139,69 @@ local function GetCurrentTime()
 		return time()
 	end
 	return 0
+end
+
+local function GetRollTrace()
+	local db = GetDatabase()
+	if type(db.rollTrace) ~= "table" or db.rollTrace.schemaVersion ~= ROLL_TRACE_SCHEMA_VERSION then
+		db.rollTrace = {
+			schemaVersion = ROLL_TRACE_SCHEMA_VERSION,
+			maxEntries = ROLL_TRACE_MAX_ENTRIES,
+			nextSequence = 1,
+			entries = {},
+		}
+	end
+	if type(db.rollTrace.entries) ~= "table" then
+		db.rollTrace.entries = {}
+	end
+	if type(db.rollTrace.nextSequence) ~= "number" then
+		db.rollTrace.nextSequence = #db.rollTrace.entries + 1
+	end
+	db.rollTrace.maxEntries = ROLL_TRACE_MAX_ENTRIES
+	return db.rollTrace
+end
+
+local function CountActiveRows()
+	local count = 0
+	for _ in pairs(rows) do
+		count = count + 1
+	end
+	return count
+end
+
+local function AppendRollTrace(name, data)
+	local db = GetDatabase()
+	if db.rollTraceEnabled == false then
+		return
+	end
+
+	local trace = GetRollTrace()
+	local entry = {
+		sequence = trace.nextSequence,
+		time = GetCurrentTime(),
+		name = name,
+		activeRows = CountActiveRows(),
+	}
+	trace.nextSequence = trace.nextSequence + 1
+	if type(data) == "table" then
+		entry.data = data
+	end
+
+	local entries = trace.entries
+	entries[#entries + 1] = entry
+	while #entries > ROLL_TRACE_MAX_ENTRIES do
+		table.remove(entries, 1)
+	end
+end
+
+local function ClearRollTrace()
+	local db = GetDatabase()
+	db.rollTrace = {
+		schemaVersion = ROLL_TRACE_SCHEMA_VERSION,
+		maxEntries = ROLL_TRACE_MAX_ENTRIES,
+		nextSequence = 1,
+		entries = {},
+	}
 end
 
 local function SetDefaultAnchorPoint()
@@ -513,24 +589,101 @@ local function SetButtonEnabled(button, enabled)
 	end
 end
 
+local function IsPositiveRollFlag(value)
+	return value == true or value == 1
+end
+
+local function GetRollOptionState(canRoll, unavailableReason)
+	if IsPositiveRollFlag(canRoll) then
+		return OPTION_STATE_AVAILABLE
+	end
+	if unavailableReason ~= nil then
+		return OPTION_STATE_UNAVAILABLE
+	end
+
+	return OPTION_STATE_UNKNOWN
+end
+
+local function GetRollChoiceState(row, choice)
+	if choice == "PASS" then
+		return OPTION_STATE_AVAILABLE
+	elseif choice == "NEED" then
+		return row.needState or OPTION_STATE_UNKNOWN
+	elseif choice == "GREED" then
+		return row.greedState or OPTION_STATE_UNKNOWN
+	elseif choice == "DISENCHANT" then
+		return row.disenchantState or OPTION_STATE_UNKNOWN
+	end
+
+	return OPTION_STATE_UNAVAILABLE
+end
+
 local function IsRollChoiceAvailable(row, choice)
 	if not row or row.selected then
 		return false
 	end
-	if choice == "PASS" then
-		return true
+
+	return GetRollChoiceState(row, choice) ~= OPTION_STATE_UNAVAILABLE
+end
+
+local function IsButtonCurrentlyEnabled(button)
+	if not button then
+		return nil
 	end
-	if not row.rollOptionsReady then
-		return true
+	if button.IsEnabled then
+		return IsPositiveRollFlag(button:IsEnabled())
 	end
-	if choice == "NEED" then
-		return row.canNeed
-	elseif choice == "GREED" then
-		return row.canGreed
-	elseif choice == "DISENCHANT" then
-		return row.canDisenchant
+	return nil
+end
+
+local function GetRowTraceState(row)
+	if not row then
+		return nil
 	end
-	return false
+
+	return {
+		rollID = row.rollID,
+		itemID = row.itemID,
+		itemName = row.itemName,
+		itemCount = row.itemCount,
+		quality = row.quality,
+		bindOnPickUp = row.bindOnPickUp,
+		itemInfoReady = row.itemInfoReady,
+		rollOptionsReady = row.rollOptionsReady,
+		needState = row.needState,
+		greedState = row.greedState,
+		disenchantState = row.disenchantState,
+		canNeed = row.canNeed,
+		canGreed = row.canGreed,
+		canDisenchant = row.canDisenchant,
+		reasonNeed = row.reasonNeed,
+		reasonGreed = row.reasonGreed,
+		reasonDisenchant = row.reasonDisenchant,
+		selected = row.selected,
+		statusMode = row.statusMode,
+		buttonNeedEnabled = IsButtonCurrentlyEnabled(row.buttons and row.buttons.NEED),
+		buttonGreedEnabled = IsButtonCurrentlyEnabled(row.buttons and row.buttons.GREED),
+		buttonDisenchantEnabled = IsButtonCurrentlyEnabled(row.buttons and row.buttons.DISENCHANT),
+		buttonPassEnabled = IsButtonCurrentlyEnabled(row.buttons and row.buttons.PASS),
+	}
+end
+
+local function BuildRollInfoTraceSignature(data)
+	return table.concat({
+		tostring(data.rollID),
+		tostring(data.canNeed),
+		tostring(data.canGreed),
+		tostring(data.canDisenchant),
+		tostring(data.reasonNeed),
+		tostring(data.reasonGreed),
+		tostring(data.reasonDisenchant),
+		tostring(data.needState),
+		tostring(data.greedState),
+		tostring(data.disenchantState),
+		tostring(data.buttonNeedEnabled),
+		tostring(data.buttonGreedEnabled),
+		tostring(data.buttonDisenchantEnabled),
+	}, "|")
 end
 
 local function RefreshButtons(row)
@@ -690,16 +843,28 @@ local function ReleaseRow(row)
 	row.expiresAt = nil
 	row.hovered = nil
 	row.compareShown = nil
+	row.lastRollInfoTraceSignature = nil
 	table.insert(rowPool, row)
 end
 
-local function RemoveRow(rollID)
+local function RemoveRow(rollID, reason)
 	local row = rows[rollID]
 	if not row then
+		AppendRollTrace("remove-row-missing", {
+			rollID = rollID,
+			reason = reason or "unknown",
+		})
 		return
 	end
 
-	ClearPendingConfirmation(rollID)
+	AppendRollTrace("remove-row", {
+		reason = reason or "unknown",
+		pendingConfirmationKept = GetPendingConfirmation(rollID) ~= nil,
+		row = GetRowTraceState(row),
+	})
+	if not GetPendingConfirmation(rollID) then
+		ClearPendingConfirmation(rollID)
+	end
 	rows[rollID] = nil
 	for index, existingRollID in ipairs(rowOrder) do
 		if existingRollID == rollID then
@@ -730,10 +895,11 @@ local function GetRollTimeLeftSeconds(row)
 	return DEFAULT_ROLL_SECONDS
 end
 
-local function RefreshRollInfo(row)
+local function RefreshRollInfo(row, refreshReason)
 	local texture, name, count, quality, bindOnPickUp, canNeed, canGreed, canDisenchant
+	local reasonNeed, reasonGreed, reasonDisenchant
 	if type(GetLootRollItemInfo) == "function" and row.rollID then
-		texture, name, count, quality, bindOnPickUp, canNeed, canGreed, canDisenchant = GetLootRollItemInfo(row.rollID)
+		texture, name, count, quality, bindOnPickUp, canNeed, canGreed, canDisenchant, reasonNeed, reasonGreed, reasonDisenchant = GetLootRollItemInfo(row.rollID)
 	end
 
 	local itemLink = row.itemLink
@@ -765,12 +931,17 @@ local function RefreshRollInfo(row)
 	if bindOnPickUp ~= nil then
 		row.bindOnPickUp = bindOnPickUp and true or false
 	end
-	if canNeed ~= nil or canGreed ~= nil or canDisenchant ~= nil then
-		row.rollOptionsReady = true
-		row.canNeed = canNeed and true or false
-		row.canGreed = canGreed and true or false
-		row.canDisenchant = canDisenchant and true or false
-	end
+
+	row.needState = GetRollOptionState(canNeed, reasonNeed)
+	row.greedState = GetRollOptionState(canGreed, reasonGreed)
+	row.disenchantState = GetRollOptionState(canDisenchant, reasonDisenchant)
+	row.rollOptionsReady = row.needState ~= OPTION_STATE_UNKNOWN and row.greedState ~= OPTION_STATE_UNKNOWN and row.disenchantState ~= OPTION_STATE_UNKNOWN
+	row.canNeed = row.needState == OPTION_STATE_AVAILABLE
+	row.canGreed = row.greedState == OPTION_STATE_AVAILABLE
+	row.canDisenchant = row.disenchantState == OPTION_STATE_AVAILABLE
+	row.reasonNeed = reasonNeed
+	row.reasonGreed = reasonGreed
+	row.reasonDisenchant = reasonDisenchant
 
 	local color = ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[row.quality]
 	if color then
@@ -792,19 +963,60 @@ local function RefreshRollInfo(row)
 		SetDetailStatus(row)
 	end
 	RefreshButtons(row)
+
+	local traceData = {
+		refreshReason = refreshReason or "unknown",
+		apiName = name,
+		apiCount = count,
+		apiQuality = quality,
+		apiBindOnPickUp = bindOnPickUp,
+		apiCanNeed = canNeed,
+		apiCanGreed = canGreed,
+		apiCanDisenchant = canDisenchant,
+		apiReasonNeed = reasonNeed,
+		apiReasonGreed = reasonGreed,
+		apiReasonDisenchant = reasonDisenchant,
+		itemLinkKnown = itemLink ~= nil,
+	}
+	local rowState = GetRowTraceState(row)
+	if rowState then
+		for key, value in pairs(rowState) do
+			traceData[key] = value
+		end
+	end
+	local signature = BuildRollInfoTraceSignature(traceData)
+	if traceData.refreshReason ~= "update" or signature ~= row.lastRollInfoTraceSignature then
+		AppendRollTrace("roll-info", traceData)
+		row.lastRollInfoTraceSignature = signature
+	end
 end
 
 local function SelectRoll(row, choice)
 	if row.selected then
+		AppendRollTrace("roll-click-ignored", {
+			reason = "already-selected",
+			choice = choice,
+			row = GetRowTraceState(row),
+		})
 		return
 	end
 
 	PrintDebug("click rollID=" .. tostring(row.rollID) .. " choice=" .. tostring(choice))
-	RefreshRollInfo(row)
+	local beforeRollState = GetRowTraceState(row)
+	AppendRollTrace("roll-click", {
+		choice = choice,
+		before = beforeRollState,
+	})
+	RefreshRollInfo(row, "click")
 	if not IsRollChoiceAvailable(row, choice) then
 		row.statusMode = "error"
 		row.status:SetTextColor(0.90, 0.25, 0.20)
 		row.status:SetText(GetChoiceTooltip(choice) .. " unavailable")
+		AppendRollTrace("roll-click-blocked", {
+			reason = "choice-unavailable",
+			choice = choice,
+			afterRefresh = GetRowTraceState(row),
+		})
 		return
 	end
 
@@ -813,17 +1025,44 @@ local function SelectRoll(row, choice)
 		row.statusMode = "error"
 		row.status:SetTextColor(0.90, 0.25, 0.20)
 		row.status:SetText("Roll API unavailable")
+		AppendRollTrace("roll-click-blocked", {
+			reason = "roll-api-unavailable",
+			choice = choice,
+			rollType = rollType,
+			row = GetRowTraceState(row),
+		})
 		return
 	end
 
 	TrackPendingConfirmation(row, choice, rollType)
-	local ok, errorMessage = pcall(RollOnLoot, row.rollID, rollType)
+	local rollID = row.rollID
+	local ok, errorMessage = pcall(RollOnLoot, rollID, rollType)
 	if not ok then
-		ClearPendingConfirmation(row.rollID)
+		ClearPendingConfirmation(rollID)
 		row.statusMode = "error"
 		row.status:SetTextColor(0.90, 0.25, 0.20)
 		row.status:SetText("Roll failed")
 		PrintDebug(errorMessage)
+		AppendRollTrace("roll-call-result", {
+			ok = false,
+			rollID = rollID,
+			choice = choice,
+			rollType = rollType,
+			errorMessage = tostring(errorMessage),
+			row = GetRowTraceState(row),
+		})
+		return
+	end
+
+	if rows[rollID] ~= row then
+		AppendRollTrace("roll-call-result", {
+			ok = true,
+			rollID = rollID,
+			choice = choice,
+			rollType = rollType,
+			rowRemovedDuringCall = true,
+			before = beforeRollState,
+		})
 		return
 	end
 
@@ -835,6 +1074,13 @@ local function SelectRoll(row, choice)
 		row.status:SetText("Selected " .. GetChoiceTooltip(choice))
 	end
 	RefreshButtons(row)
+	AppendRollTrace("roll-call-result", {
+		ok = true,
+		rollID = rollID,
+		choice = choice,
+		rollType = rollType,
+		row = GetRowTraceState(row),
+	})
 end
 
 local function CreateRollButton(row, choice, index)
@@ -1003,6 +1249,13 @@ local function AcquireRow(rollID)
 	row.canNeed = false
 	row.canGreed = false
 	row.canDisenchant = false
+	row.needState = OPTION_STATE_UNKNOWN
+	row.greedState = OPTION_STATE_UNKNOWN
+	row.disenchantState = OPTION_STATE_UNKNOWN
+	row.reasonNeed = nil
+	row.reasonGreed = nil
+	row.reasonDisenchant = nil
+	row.lastRollInfoTraceSignature = nil
 	row.selected = nil
 	row.startedAt = GetCurrentTime()
 	row.expiresAt = row.startedAt + DEFAULT_ROLL_SECONDS
@@ -1024,15 +1277,26 @@ end
 
 local function StartRoll(rollID, rollTime)
 	if not IsEnabled() then
+		AppendRollTrace("start-roll-ignored", {
+			reason = "disabled",
+			rollID = rollID,
+			rollTime = rollTime,
+		})
 		return
 	end
 
 	rollID = tonumber(rollID)
 	if not rollID then
 		PrintDebug("Ignoring START_LOOT_ROLL without roll ID.")
+		AppendRollTrace("start-roll-ignored", {
+			reason = "missing-roll-id",
+			rollID = rollID,
+			rollTime = rollTime,
+		})
 		return
 	end
 
+	local rowAlreadyExisted = rows[rollID] ~= nil
 	local row = rows[rollID] or AcquireRow(rollID)
 	row.rollID = rollID
 	row.startedAt = GetCurrentTime()
@@ -1044,6 +1308,13 @@ local function StartRoll(rollID, rollTime)
 	row.canNeed = false
 	row.canGreed = false
 	row.canDisenchant = false
+	row.needState = OPTION_STATE_UNKNOWN
+	row.greedState = OPTION_STATE_UNKNOWN
+	row.disenchantState = OPTION_STATE_UNKNOWN
+	row.reasonNeed = nil
+	row.reasonGreed = nil
+	row.reasonDisenchant = nil
+	row.lastRollInfoTraceSignature = nil
 
 	local seconds = (tonumber(rollTime) or 0) / 1000
 	if seconds <= 0 then
@@ -1056,7 +1327,14 @@ local function StartRoll(rollID, rollTime)
 	row.expiresAt = row.startedAt + seconds
 	row.timerBar:SetWidth(ROW_WIDTH - 2)
 
-	RefreshRollInfo(row)
+	AppendRollTrace("start-roll", {
+		rollID = rollID,
+		rollTime = rollTime,
+		countdown = seconds,
+		rowAlreadyExisted = rowAlreadyExisted,
+		rowOrderCount = #rowOrder,
+	})
+	RefreshRollInfo(row, "start")
 	SetDetailStatus(row)
 	row.frame:Show()
 	HideNativeLootRollFrames()
@@ -1068,7 +1346,7 @@ local function ClearRows()
 		rollIDs[#rollIDs + 1] = rollID
 	end
 	for _, rollID in ipairs(rollIDs) do
-		RemoveRow(rollID)
+		RemoveRow(rollID, "clear")
 	end
 end
 
@@ -1087,11 +1365,40 @@ local function SetEnabled(enabled)
 	UpdateAnchorVisibility()
 end
 
+local function HandleTraceCommand(argument)
+	local db = GetDatabase()
+	argument = string.lower(argument or "")
+
+	if argument == "on" or argument == "enable" then
+		db.rollTraceEnabled = true
+		AppendRollTrace("trace-toggle", {
+			enabled = true,
+		})
+		Print("roll trace enabled. Data is saved in CleanLootDB.rollTrace.")
+	elseif argument == "off" or argument == "disable" then
+		AppendRollTrace("trace-toggle", {
+			enabled = false,
+		})
+		db.rollTraceEnabled = false
+		Print("roll trace disabled.")
+	elseif argument == "clear" or argument == "reset" then
+		ClearRollTrace()
+		Print("roll trace cleared.")
+	elseif argument == "" or argument == "status" then
+		local trace = GetRollTrace()
+		Print("Roll trace: " .. (db.rollTraceEnabled ~= false and "enabled" or "disabled") .. ", entries: " .. tostring(#trace.entries) .. "/" .. tostring(ROLL_TRACE_MAX_ENTRIES) .. ".")
+		Print("Commands: /cleanloot trace on, off, clear.")
+	else
+		Print("Unknown trace command. Use /cleanloot trace on, off, clear.")
+	end
+end
+
 local function HandleSlashCommand(message)
-	local command = string.lower(string.match(message or "", "^%s*(%S*)") or "")
+	local command, argument = string.match(message or "", "^%s*(%S*)%s*(.-)%s*$")
+	command = string.lower(command or "")
 	if command == "" or command == "status" then
 		Print("Status: " .. (IsEnabled() and "enabled" or "disabled") .. ".")
-		Print("Commands: /cleanloot on, off, unlock, lock, reset, debug.")
+		Print("Commands: /cleanloot on, off, unlock, lock, reset, debug, trace.")
 	elseif command == "on" or command == "enable" then
 		SetEnabled(true)
 	elseif command == "off" or command == "disable" then
@@ -1115,6 +1422,8 @@ local function HandleSlashCommand(message)
 		local db = GetDatabase()
 		db.debug = not db.debug
 		Print("debug " .. (db.debug and "enabled." or "disabled."))
+	elseif command == "trace" or command == "rolltrace" then
+		HandleTraceCommand(argument)
 	else
 		Print("Unknown command. Use /cleanloot for help.")
 	end
@@ -1138,16 +1447,20 @@ local function OnUpdate()
 			row.timerBar:SetWidth(width)
 
 			if not row.itemInfoReady or not row.rollOptionsReady then
-				RefreshRollInfo(row)
+				RefreshRollInfo(row, "update")
 			end
 			if remaining <= 0 and not row.removeAt then
 				ScheduleRowRemoval(row, RESULT_SECONDS)
+				AppendRollTrace("row-removal-scheduled", {
+					reason = "timer-expired",
+					row = GetRowTraceState(row),
+				})
 			end
 		end
 	end
 
 	for _, rollID in ipairs(removeIDs) do
-		RemoveRow(rollID)
+		RemoveRow(rollID, "scheduled")
 	end
 
 	if HasActiveRows() then
@@ -1160,13 +1473,19 @@ local function OnEvent(_, event, ...)
 		local loadedName = ...
 		if loadedName == ADDON_NAME then
 			GetDatabase()
+			AppendRollTrace("addon-loaded", {
+				addonName = ADDON_NAME,
+				version = type(GetAddOnMetadata) == "function" and GetAddOnMetadata(ADDON_NAME, "Version") or nil,
+			})
 			ApplyAnchorPoint()
 			UpdateAnchorVisibility()
 		end
 	elseif event == "PLAYER_LOGIN" then
+		AppendRollTrace("player-login")
 		ApplyAnchorPoint()
 		UpdateAnchorVisibility()
 	elseif event == "PLAYER_ENTERING_WORLD" then
+		AppendRollTrace("player-entering-world")
 		ClearRows()
 		ClearPendingConfirmations()
 		StopConfirmMonitor()
@@ -1176,25 +1495,53 @@ local function OnEvent(_, event, ...)
 	elseif event == "CANCEL_LOOT_ROLL" then
 		local rollID = tonumber(...)
 		if rollID then
-			RemoveRow(rollID)
+			AppendRollTrace("cancel-loot-roll", {
+				rollID = rollID,
+				row = GetRowTraceState(rows[rollID]),
+			})
+			RemoveRow(rollID, "cancel-event")
 		end
-	elseif event == "CONFIRM_LOOT_ROLL" then
-		local rollID, rollType = ...
-		local row = rows[tonumber(rollID)]
-		if row then
-			local choice = ROLL_TYPE_TO_CHOICE[tonumber(rollType)] or row.selected or "NEED"
-			local r, g, b = GetChoiceColor(choice)
-			if AutoConfirmLootRoll(rollID, rollType) then
-				row.statusMode = "confirmed"
+		elseif event == "CONFIRM_LOOT_ROLL" then
+			local rollID, rollType = ...
+			local numericRollID = tonumber(rollID)
+			local numericRollType = tonumber(rollType)
+			local row = rows[numericRollID]
+			if row then
+				local choice = ROLL_TYPE_TO_CHOICE[numericRollType] or row.selected or "NEED"
+				local r, g, b = GetChoiceColor(choice)
+				if AutoConfirmLootRoll(rollID, rollType) then
+					row.statusMode = "confirmed"
 				row.status:SetTextColor(r, g, b)
 				row.status:SetText("Confirmed " .. GetChoiceTooltip(choice))
+					AppendRollTrace("confirm-loot-roll", {
+						rollID = numericRollID,
+						rollType = numericRollType,
+						choice = choice,
+						autoConfirmed = true,
+						row = GetRowTraceState(row),
+				})
 			else
 				row.statusMode = "confirm"
 				row.status:SetTextColor(r, g, b)
 				row.status:SetText("Confirm " .. GetChoiceTooltip(choice) .. " in popup")
+					AppendRollTrace("confirm-loot-roll", {
+						rollID = numericRollID,
+						rollType = numericRollType,
+						choice = choice,
+						autoConfirmed = false,
+						row = GetRowTraceState(row),
+					})
+				end
+			else
+				local autoConfirmed = AutoConfirmLootRoll(rollID, rollType)
+				AppendRollTrace("confirm-loot-roll-missing-row", {
+					rollID = numericRollID,
+					rollType = numericRollType,
+					choice = ROLL_TYPE_TO_CHOICE[numericRollType],
+					autoConfirmed = autoConfirmed,
+				})
 			end
 		end
-	end
 end
 
 SetDefaultAnchorPoint()
